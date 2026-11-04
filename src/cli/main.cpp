@@ -101,7 +101,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "-o %s is a file, but there are %zu inputs; give a folder instead\n", output.c_str(), inputs.size());
         return 2;
     }
-    if (!output.empty() && !outputIsFile) fs::create_directories(output, ec);
+    if (!output.empty()) {
+        fs::path dir = outputIsFile ? fs::path(output).parent_path() : fs::path(output);
+        if (!dir.empty()) fs::create_directories(dir, ec);
+    }
 
     std::signal(SIGINT, [](int) { g_cancel = true; });
 

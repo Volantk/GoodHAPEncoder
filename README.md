@@ -2,16 +2,85 @@
 
 A Hap Q / Hap Q Alpha encoder that keeps gradients and fine detail.
 
-FFmpeg's Hap Q encoder bands badly in skies, glows and dark gradients, often with green/pink tints. GoodHAP writes standard `HapY` / `HapM` QuickTime files that any Hap player reads (Pixera, Resolume, TouchDesigner, VDMX, the Hap plugins), but searches much harder for each 4x4 block:
+FFmpeg's Hap Q encoder (the one most tools use) bands badly in skies, glows and dark gradients, often with green and pink tints. GoodHAP writes standard Hap Q files (`HapY` / `HapM` QuickTime .mov) that any Hap player reads: Pixera, Resolume, TouchDesigner, VDMX, the Unreal/Unity Hap plugins. It just searches much harder for the best way to store each 4x4 block, so the picture comes out much closer to the source.
 
-- **Full-precision input.** 10/16-bit sources (ProRes, DNxHR, PNG/TIFF/EXR sequences) go into the block fit as floats. Luma interpolation in the DXT5 alpha block then gives better than 8-bit gradients.
-- **Fits the picture the player shows.** Endpoints are chosen to minimise the error of the RGB the Hap Q shader reconstructs, not the error of the stored YCoCg values. Luma is corrected for the chroma error that the block quantisation leaves.
-- **Every chroma scale (1-4)** is tried per block. Scales stay in the range where the Hap shader and FFmpeg's CPU decoder agree exactly.
-- **Endpoint search** around a PCA/least-squares start, for both the 5:6-bit chroma and the 8-bit luma/alpha endpoints.
-- **Blue-noise dither** (tunable, animated or static) turns the remaining quantisation into fine noise instead of bands. It fades out at 0 and 1, so pure black, white and opaque stay exact.
-- **Alpha-weighted colour** for Hap Q Alpha: colour bits go where the pixel is visible.
+- **macOS:** command-line tool (tested on Apple Silicon; Intel Macs should build the same way)
+- **Windows:** drag-and-drop app with a side-by-side preview, plus the same command-line tool
 
-## Results (single frames, PSNR in dB, decoded like a GPU)
+## Install on macOS
+
+You need Terminal (in Applications → Utilities) and about 10 minutes the first time.
+
+**1. Install Homebrew** if you don't have it. Paste this into Terminal and follow what it says (it asks for your Mac password and may install Apple's command line tools):
+
+```
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+When it finishes it prints two or three lines under "Next steps" to add Homebrew to your PATH. Run those too.
+
+**2. Download and build GoodHAP:**
+
+```
+cd ~
+git clone https://github.com/Volantk/GoodHAPEncoder
+cd GoodHAPEncoder
+./build-mac.sh
+```
+
+The script installs FFmpeg, CMake and pkg-config through Homebrew if they're missing, then builds `goodhap-cli`. It takes a few minutes the first time.
+
+**3. Make it a command you can run from anywhere** (optional, recommended):
+
+```
+ln -sf ~/GoodHAPEncoder/build-mac/bin/goodhap-cli "$(brew --prefix)/bin/goodhap"
+```
+
+Check that it works with `goodhap --help`.
+
+**Updating later:**
+
+```
+cd ~/GoodHAPEncoder && git pull && ./build-mac.sh
+```
+
+## Use
+
+```
+goodhap clip.mov
+```
+
+writes `clip_HapQ.mov` next to the source (`clip_HapQAlpha.mov` when the source has transparency). Tip: type `goodhap ` (with a space), then drag the file from Finder into the Terminal window to paste its path.
+
+More examples:
+
+```
+goodhap --quality high clip.mov               # slower, a little better
+goodhap *.mov -o ~/Desktop/hap                # every .mov in this folder, into one output folder
+goodhap renders/shot_0001.exr -o shot.mov     # a numbered image sequence: give any one frame
+goodhap clip.mov --frames 100                 # quick test: first 100 frames only
+```
+
+Inputs: anything FFmpeg reads. That includes ProRes (with alpha), DNxHR, H.264/H.265 and PNG, TIFF, EXR, DPX or TGA sequences. 10- and 16-bit sources keep their extra precision, which helps gradients most.
+
+| option | what it does |
+|---|---|
+| `-o PATH` | output file (one input) or folder. Default: next to each input |
+| `--quality fast\|normal\|high\|max` | how hard to search. Default `normal`. `high` for finals, `max` mostly for stills |
+| `--dither 0..1` | fine noise that hides banding in gradients. Default `1`. Use `0` for flat graphics and text |
+| `--static-dither` | same noise every frame instead of a new pattern per frame (for loops that must match) |
+| `--format q\|qa` | force Hap Q or Hap Q Alpha. Default: Alpha only when the source has an alpha channel |
+| `--frames N` | stop after N frames |
+| `--chunks N` | Hap chunks per frame, for multithreaded playback. Default: automatic |
+| `--no-snappy` | skip the lossless snappy stage: bigger files, slightly less CPU in the player |
+
+Ctrl-C stops and deletes the unfinished file. Audio is not copied.
+
+Encoding is CPU work and slower than FFmpeg: on a 24-thread PC, a 3360x1890 clip runs at about 6 fps on `fast`, 3 fps on `normal` and 1.8 fps on `high`. 1080p is roughly three times faster.
+
+## Results
+
+Single frames, PSNR in dB (higher is better, +6 dB is half the error), decoded the way a GPU decodes Hap Q:
 
 | source | FFmpeg hap_q | GoodHAP normal | low-freq: FFmpeg | low-freq: GoodHAP |
 |---|---|---|---|---|
@@ -21,11 +90,18 @@ FFmpeg's Hap Q encoder bands badly in skies, glows and dark gradients, often wit
 
 "Low-freq" is PSNR after blurring both images (sigma 2.5). It measures banding, tints and blotches, which is what you see on an LED wall.
 
-Speed (24 threads, 3360x1890): Fast ~6 fps, Normal ~3 fps, High ~1.8 fps. FFmpeg's encoder is much faster (~70 fps) and much worse.
+How it gets there:
 
-## Use
+- **Full-precision input.** 10/16-bit sources go into the block fit as floats. Luma interpolation in the DXT5 alpha block then gives better than 8-bit gradients.
+- **Fits the picture the player shows.** Endpoints are chosen to minimise the error of the RGB the Hap Q shader reconstructs, not the error of the stored YCoCg values. Luma is corrected for the chroma error that the block quantisation leaves.
+- **Every chroma scale (1-4)** is tried per block. Scales stay in the range where the Hap shader and FFmpeg's CPU decoder agree exactly.
+- **Endpoint search** around a PCA/least-squares start, for both the 5:6-bit chroma and the 8-bit luma/alpha endpoints.
+- **Blue-noise dither** (tunable, animated or static) turns the remaining quantisation into fine noise instead of bands. It fades out at 0 and 1, so pure black, white and opaque stay exact.
+- **Alpha-weighted colour** for Hap Q Alpha: colour bits go where the pixel is visible.
 
-**App:** run `GoodHAP.exe`, drop videos, image sequences (drop one frame or the folder) or stills. Pick a clip to preview it:
+## Windows app
+
+Run `GoodHAP.exe` and drop videos, image sequences (one frame or the folder) or stills on it. Pick a clip to preview it:
 
 - `1` `2` `3`: Source / GoodHAP / FFmpeg (FFmpeg's built-in Hap Q, for comparison)
 - hold `Space`: flip to the source
@@ -35,31 +111,7 @@ Speed (24 threads, 3360x1890): Fast ~6 fps, Normal ~3 fps, High ~1.8 fps. FFmpeg
 
 The preview uploads real BC3/BC4 textures and decodes them on the GPU with the Hap Q shader, so it shows what a player shows.
 
-**CLI** (Windows and macOS):
-
-```
-goodhap-cli [options] <input>... [-o <output.mov | folder>]
-
-goodhap-cli clip.mov                          # -> clip_HapQ.mov next to it
-goodhap-cli --quality high *.mov -o ~/hap     # batch into a folder
-goodhap-cli renders/shot_0001.exr -o shot.mov # whole numbered sequence
-```
-
-Options: `--quality fast|normal|high|max` (default normal), `--dither 0..1`, `--static-dither`, `--format q|qa` (default: Alpha when the source has alpha), `--frames N`, `--chunks N`, `--no-snappy`. Ctrl-C stops and deletes the unfinished file.
-
-## macOS
-
-CLI only. Needs [Homebrew](https://brew.sh); the script installs FFmpeg 8+, CMake and pkg-config if missing.
-
-```
-git clone https://github.com/Volantk/GoodHAPEncoder && cd GoodHAPEncoder
-./build-mac.sh
-./build-mac/bin/goodhap-cli --help
-```
-
-The `macOS CLI` GitHub workflow builds and tests it on Apple Silicon and keeps the binary as an artifact. That binary links Homebrew's FFmpeg, so it still needs `brew install ffmpeg` on the machine that runs it.
-
-## Build (Windows)
+### Build on Windows
 
 VS 2022, CMake 3.24+.
 
@@ -70,9 +122,15 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-Vendored: Vidvox `hap.c` (BSD), Google snappy 1.2.1 (BSD), Dear ImGui 1.91.9 (MIT).
+On macOS and Linux CMake uses the system FFmpeg 8+ through pkg-config; `build-mac.sh` does the whole thing on a Mac. The `macOS CLI` GitHub workflow builds and tests every change on Apple Silicon.
 
-## Tools
+## Notes
+
+- **VLC, ffplay and mpv** decode Hap on the CPU through FFmpeg, which truncates, so they show GoodHAP files about 1/255 dark in red and blue. GPU decoders (media servers, the Hap plugins) don't. Judge quality in the real player.
+- **File size.** Dither makes blocks unique, so the lossless snappy stage compresses less than with FFmpeg's encoder. On real footage the difference is small (2.5 vs 2.1 MB per frame at 3360x1890); on smooth synthetic gradients it is larger. `--dither 0` gives smaller files. Hap Q is bandwidth-bound by design either way.
+- **Black next to bright.** Black pixels that share a 4x4 block with a bright particle can lift a little (FFmpeg's encoder does the same). That's a limit of the block format.
+
+## Developer tools
 
 - `ghap_eval gen sky|dark|ramps|detail out.png`: 16-bit test images
 - `ghap_eval sweep <source>` / `ghap_eval try <source> c1,a5,s2,d1 ...`: settings experiments
@@ -80,8 +138,4 @@ Vendored: Vidvox `hap.c` (BSD), Google snappy 1.2.1 (BSD), Dear ImGui 1.91.9 (MI
 - `GoodHAP.exe --capture out.png [--encode] [--view N] [--diff] [--zoom Z cx cy] files...`: hidden-window render of the app to PNG
 - `tools/viz.py`: contrast-stretched crop comparisons
 
-## Notes
-
-- FFmpeg's own CPU Hap decoder (ffplay, VLC, mpv) truncates, so it shows GoodHAP files about 1/255 dark in red and blue. GPU decoders don't.
-- Dither makes blocks unique, so snappy compresses less: files are ~70% of uncompressed Hap Q instead of FFmpeg's ~20-50% on synthetic gradients. On real footage the difference is small (2.5 vs 2.1 MB/frame at 3360x1890). Hap Q is bandwidth-bound by design either way.
-- Black pixels that share a 4x4 block with a bright particle can lift a little (same as FFmpeg). That's a limit of the block format.
+Vendored: Vidvox `hap.c` (BSD), Google snappy 1.2.1 (BSD), Dear ImGui 1.91.9 (MIT).
