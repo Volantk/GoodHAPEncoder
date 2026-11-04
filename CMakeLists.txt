@@ -41,16 +41,28 @@ add_library(ghapcore STATIC
   src/core/media_reader.cpp
   src/core/mov_writer.cpp
   src/core/transcode.cpp
+  src/core/metrics.cpp
 )
 target_include_directories(ghapcore PUBLIC src/core)
 target_link_libraries(ghapcore PUBLIC ffmpeg PRIVATE hapframe)
 
-add_executable(goodhap src/cli/main.cpp)
-target_link_libraries(goodhap PRIVATE ghapcore)
+add_executable(goodhap-cli src/cli/main.cpp)
+target_link_libraries(goodhap-cli PRIVATE ghapcore)
 
 add_executable(ghap_eval tools/eval/eval.cpp)
 target_link_libraries(ghap_eval PRIVATE ghapcore hapframe)
 target_compile_definitions(ghap_eval PRIVATE GHAP_FFMPEG_EXE="${FFMPEG_DIR}/bin/ffmpeg.exe")
+
+# --- GUI ----------------------------------------------------------------------
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+add_library(imgui STATIC
+  ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp ${IMGUI_DIR}/imgui_widgets.cpp
+  ${IMGUI_DIR}/backends/imgui_impl_win32.cpp ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp)
+target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+
+add_executable(GoodHAP WIN32 src/app/main.cpp src/app/app.cpp src/app/preview_renderer.cpp)
+target_link_libraries(GoodHAP PRIVATE ghapcore imgui d3d11 d3dcompiler dxgi dwmapi shcore)
+target_compile_definitions(GoodHAP PRIVATE UNICODE _UNICODE)
 
 # copy FFmpeg dlls next to the executables
 file(GLOB FFMPEG_DLLS ${FFMPEG_DIR}/bin/*.dll)

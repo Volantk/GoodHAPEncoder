@@ -27,17 +27,13 @@ extern "C" {
 #include "block_decode.h"
 #include "frame_encoder.h"
 #include "media_reader.h"
+#include "metrics.h"
 
 using namespace ghap;
 
 #ifndef GHAP_FFMPEG_EXE
 #define GHAP_FFMPEG_EXE "ffmpeg"
 #endif
-
-struct ImageF {
-    int w = 0, h = 0;
-    std::vector<float> rgb; // interleaved 3
-};
 
 static bool writePng(const std::string& path, int w, int h, const std::vector<uint16_t>& rgba64) {
     std::string cmd = std::string("\"\"") + GHAP_FFMPEG_EXE + "\" -hide_banner -loglevel error -y -f rawvideo -pix_fmt rgba64le -s " +
@@ -99,68 +95,6 @@ static ImageF generate(const std::string& kind, int w, int h) {
             float* p = &im.rgb[(size_t(y) * w + x) * 3];
             p[0] = std::clamp(r, 0.f, 1.f); p[1] = std::clamp(g, 0.f, 1.f); p[2] = std::clamp(b, 0.f, 1.f);
         }
-    return im;
-}
-
-// --- metrics ------------------------------------------------------------------
-
-static void blur(const ImageF& in, ImageF& out, float sigma) {
-    int rad = int(std::ceil(sigma * 3));
-    std::vector<float> k(2 * rad + 1);
-    float s = 0;
-    for (int i = -rad; i <= rad; ++i) s += k[i + rad] = std::exp(-i * i / (2 * sigma * sigma));
-    for (auto& v : k) v /= s;
-    ImageF tmp = in;
-    out = in;
-    for (int y = 0; y < in.h; ++y)
-        for (int x = 0; x < in.w; ++x)
-            for (int c = 0; c < 3; ++c) {
-                float a = 0;
-                for (int i = -rad; i <= rad; ++i) a += k[i + rad] * in.rgb[(size_t(y) * in.w + std::clamp(x + i, 0, in.w - 1)) * 3 + c];
-                tmp.rgb[(size_t(y) * in.w + x) * 3 + c] = a;
-            }
-    for (int y = 0; y < in.h; ++y)
-        for (int x = 0; x < in.w; ++x)
-            for (int c = 0; c < 3; ++c) {
-                float a = 0;
-                for (int i = -rad; i <= rad; ++i) a += k[i + rad] * tmp.rgb[(size_t(std::clamp(y + i, 0, in.h - 1)) * in.w + x) * 3 + c];
-                out.rgb[(size_t(y) * in.w + x) * 3 + c] = a;
-            }
-}
-
-static double psnr(const ImageF& a, const ImageF& b) {
-    double se = 0;
-    for (size_t i = 0; i < a.rgb.size(); ++i) { double d = double(a.rgb[i]) - b.rgb[i]; se += d * d; }
-    double mse = se / a.rgb.size();
-    return mse <= 0 ? 99.0 : 10.0 * std::log10(1.0 / mse);
-}
-
-struct Metrics { double psnr, psnr8, smooth8; };
-
-static Metrics measure(const ImageF& src, const ImageF& dec) {
-    ImageF d = dec, d8 = dec;
-    for (auto& v : d.rgb) v = std::clamp(v, 0.f, 1.f);
-    for (auto& v : d8.rgb) v = std::round(std::clamp(v, 0.f, 1.f) * 255.f) / 255.f;
-    ImageF bs, bd;
-    blur(src, bs, 2.5f);
-    blur(d8, bd, 2.5f);
-    return {psnr(src, d), psnr(src, d8), psnr(bs, bd)};
-}
-
-static ImageF fromFrame(const Frame16& f) {
-    ImageF im{f.width, f.height, std::vector<float>(size_t(f.width) * f.height * 3)};
-    for (size_t i = 0; i < size_t(f.width) * f.height; ++i)
-        for (int k = 0; k < 3; ++k) im.rgb[i * 3 + k] = f.rgba[i * 4 + k] / 65535.f;
-    return im;
-}
-
-static ImageF fromTextures(const EncodedTextures& t, int w, int h) {
-    std::vector<float> rgba(size_t(t.texWidth) * t.texHeight * 4);
-    decodeHapQAlphaTextures(t.ycocg.data(), t.alpha.empty() ? nullptr : t.alpha.data(), t.texWidth, t.texHeight, rgba.data());
-    ImageF im{w, h, std::vector<float>(size_t(w) * h * 3)};
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x)
-            for (int k = 0; k < 3; ++k) im.rgb[(size_t(y) * w + x) * 3 + k] = rgba[(size_t(y) * t.texWidth + x) * 4 + k];
     return im;
 }
 
@@ -229,7 +163,7 @@ int main(int argc, char** argv) {
 
     Frame16 srcFrame;
     if (!loadFrame(argv[2], frame, srcFrame)) return 1;
-    ImageF src = fromFrame(srcFrame);
+    ImageF src = imageFromFrame(srcFrame);
 
     if (cmd == "metrics") {
         std::vector<uint8_t> pkt;
@@ -238,7 +172,7 @@ int main(int argc, char** argv) {
         EncodedTextures t;
         std::string err;
         if (!unpackHapFrame(pkt.data(), pkt.size(), w, h, t, &err)) { fprintf(stderr, "%s\n", err.c_str()); return 1; }
-        ImageF dec = fromTextures(t, w, h);
+        ImageF dec = imageFromTextures(t, w, h);
         Metrics m = measure(src, dec);
         printf("%-40s psnr %6.2f  psnr8 %6.2f  smooth8 %6.2f  %7.1f KB\n", std::filesystem::path(argv[3]).filename().string().c_str(),
                m.psnr, m.psnr8, m.smooth8, pkt.size() / 1024.0);
@@ -261,7 +195,7 @@ int main(int argc, char** argv) {
             auto t0 = std::chrono::steady_clock::now();
             encodeTextures(view, s, 0, t);
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-            ImageF dec = fromTextures(t, srcFrame.width, srcFrame.height);
+            ImageF dec = imageFromTextures(t, srcFrame.width, srcFrame.height);
             Metrics m = measure(src, dec);
             printf("%-12s psnr %6.2f  psnr8 %6.2f  smooth8 %6.2f  %7.1f ms\n", v.name, m.psnr, m.psnr8, m.smooth8, ms);
             if (!dumpTo.empty()) {
@@ -299,7 +233,7 @@ int main(int argc, char** argv) {
             auto t0 = std::chrono::steady_clock::now();
             encodeTextures(view, s, 0, t);
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-            Metrics m = measure(src, fromTextures(t, srcFrame.width, srcFrame.height));
+            Metrics m = measure(src, imageFromTextures(t, srcFrame.width, srcFrame.height));
             printf("%-14s psnr %6.2f  psnr8 %6.2f  smooth8 %6.2f  %7.1f ms\n", argv[i], m.psnr, m.psnr8, m.smooth8, ms);
         }
         return 0;

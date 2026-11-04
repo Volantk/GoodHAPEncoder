@@ -1,0 +1,5 @@
+{
+  "profiles": {
+    "app": { "exe": "GoodHAP.exe", "mode": "detached", "args": "" }
+  }
+}
