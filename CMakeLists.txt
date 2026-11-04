@@ -21,7 +21,10 @@ endif()
 set(SNAPPY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(SNAPPY_INSTALL OFF CACHE BOOL "" FORCE)
+# snappy 1.2.1 asks for CMake 3.1, which CMake 4 rejects.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 add_subdirectory(third_party/snappy EXCLUDE_FROM_ALL)
+unset(CMAKE_POLICY_VERSION_MINIMUM)
 
 # --- Vidvox hap frame format ------------------------------------------------
 add_library(hapframe STATIC third_party/hap/source/hap.c)
