@@ -33,11 +33,12 @@ target_link_libraries(hapframe PRIVATE snappy)
 target_include_directories(hapframe PRIVATE third_party/snappy ${CMAKE_BINARY_DIR}/third_party/snappy)
 
 # --- FFmpeg -------------------------------------------------------------------
-# Windows: BtbN lgpl-shared build in third_party/ffmpeg.
-# macOS/Linux: system FFmpeg 8 or newer through pkg-config (brew install ffmpeg).
+# Windows: BtbN lgpl-shared build in third_party/ffmpeg (or GHAP_FFMPEG_DIR).
+# macOS/Linux: system FFmpeg 5 or newer through pkg-config (brew install ffmpeg).
 add_library(ffmpeg INTERFACE)
 if(WIN32)
-  set(FFMPEG_DIR ${CMAKE_SOURCE_DIR}/third_party/ffmpeg)
+  set(GHAP_FFMPEG_DIR ${CMAKE_SOURCE_DIR}/third_party/ffmpeg CACHE PATH "FFmpeg shared build (include, lib, bin)")
+  set(FFMPEG_DIR ${GHAP_FFMPEG_DIR})
   target_include_directories(ffmpeg INTERFACE ${FFMPEG_DIR}/include)
   target_link_libraries(ffmpeg INTERFACE
     ${FFMPEG_DIR}/lib/avformat.lib ${FFMPEG_DIR}/lib/avcodec.lib
@@ -45,8 +46,11 @@ if(WIN32)
   set(FFMPEG_EXE ${FFMPEG_DIR}/bin/ffmpeg.exe)
 else()
   find_package(PkgConfig REQUIRED)
-  # libswscale 9 = FFmpeg 8: the frame-based swscale API used by media_reader.
-  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale>=9)
+  # libavformat 59 = FFmpeg 5, the first with the const AVInputFormat/AVCodec API.
+  pkg_check_modules(FFMPEG IMPORTED_TARGET libavformat>=59 libavcodec libavutil libswscale)
+  if(NOT FFMPEG_FOUND)
+    message(FATAL_ERROR "FFmpeg 5 or newer not found through pkg-config. On a Mac: brew install ffmpeg (or brew upgrade ffmpeg), then run build-mac.sh again.")
+  endif()
   target_link_libraries(ffmpeg INTERFACE PkgConfig::FFMPEG)
   set(FFMPEG_EXE ffmpeg)
 endif()

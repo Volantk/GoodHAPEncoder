@@ -172,6 +172,11 @@ int main(int argc, char** argv) {
 
     Frame16 srcFrame;
     if (!loadFrame(argv[2], frame, srcFrame)) return 1;
+
+    if (cmd == "dumpsrc") {
+        // ghap_eval dumpsrc <source> <out.png> [--frame N]: the frame as MediaReader delivers it
+        return writePng(argv[3], srcFrame.width, srcFrame.height, srcFrame.rgba) ? 0 : 1;
+    }
     ImageF src = imageFromFrame(srcFrame);
 
     if (cmd == "metrics") {

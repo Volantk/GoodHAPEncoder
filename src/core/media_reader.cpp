@@ -25,7 +25,7 @@ struct MediaReader::Impl {
     SwsContext* sws = nullptr;
     AVPacket* pkt = nullptr;
     AVFrame* frame = nullptr;
-    AVFrame* rgb = nullptr;
+    int swsW = 0, swsH = 0, swsFmt = -1, swsSpace = -1, swsRange = -1;
     int stream = -1;
     bool eof = false;
     int64_t nextIndex = 0;
@@ -34,10 +34,9 @@ struct MediaReader::Impl {
     MediaInfo info;
 
     ~Impl() {
-        av_frame_free(&rgb);
         av_frame_free(&frame);
         av_packet_free(&pkt);
-        sws_free_context(&sws);
+        sws_freeContext(sws);
         avcodec_free_context(&dec);
         avformat_close_input(&fmt);
     }
@@ -61,27 +60,39 @@ struct MediaReader::Impl {
         }
     }
 
+    // YUV (or gray) to RGBA64 with the classic swscale API, which every FFmpeg
+    // from 5 to 9 has. It undoes only the matrix and range: no gamut or
+    // transfer conversion, so the pixels stay in the source's colour space.
     bool convert(Frame16& out) {
+        const auto fmt = AVPixelFormat(frame->format);
+        const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(fmt);
+        if (!desc) return false;
+        const bool rgbIn = (desc->flags & AV_PIX_FMT_FLAG_RGB) != 0;
+        const bool yuv = !rgbIn && desc->nb_components >= 3;
         // Untagged HD video is almost always BT.709; swscale would assume 601.
-        if (frame->colorspace == AVCOL_SPC_UNSPECIFIED && frame->height >= 720) frame->colorspace = AVCOL_SPC_BT709;
-        av_frame_unref(rgb);
-        rgb->format = AV_PIX_FMT_RGBA64LE;
-        rgb->width = frame->width;
-        rgb->height = frame->height;
-        // Keep primaries and transfer: we only want the matrix and range undone,
-        // never a gamut or transfer conversion.
-        rgb->color_primaries = frame->color_primaries;
-        rgb->color_trc = frame->color_trc;
-        rgb->colorspace = AVCOL_SPC_RGB;
-        rgb->color_range = AVCOL_RANGE_JPEG;
-        if (sws_scale_frame(sws, rgb, frame) < 0) return false;
-        out.width = rgb->width;
-        out.height = rgb->height;
+        int space = frame->colorspace;
+        if (space == AVCOL_SPC_UNSPECIFIED || space == AVCOL_SPC_RESERVED) space = frame->height >= 720 ? AVCOL_SPC_BT709 : AVCOL_SPC_SMPTE170M;
+        // Gray (PNG, TIFF) is full range unless tagged otherwise; yuvj* formats are full range by definition.
+        int range = frame->color_range == AVCOL_RANGE_JPEG ? 1 : 0;
+        if (!yuv && frame->color_range != AVCOL_RANGE_MPEG) range = 1;
+        if (std::strncmp(desc->name, "yuvj", 4) == 0) range = 1;
+
+        if (!sws || frame->width != swsW || frame->height != swsH || fmt != swsFmt || space != swsSpace || range != swsRange) {
+            sws_freeContext(sws);
+            sws = sws_getContext(frame->width, frame->height, fmt, frame->width, frame->height, AV_PIX_FMT_RGBA64LE,
+                                 SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP, nullptr, nullptr, nullptr);
+            if (!sws) return false;
+            int brightness = 0, contrast = 1 << 16, saturation = 1 << 16;
+            sws_setColorspaceDetails(sws, sws_getCoefficients(space), range, sws_getCoefficients(SWS_CS_DEFAULT), 1, brightness,
+                                     contrast, saturation);
+            swsW = frame->width; swsH = frame->height; swsFmt = fmt; swsSpace = space; swsRange = range;
+        }
+        out.width = frame->width;
+        out.height = frame->height;
         out.rgba.resize(size_t(out.width) * out.height * 4);
-        for (int y = 0; y < out.height; ++y)
-            std::memcpy(out.rgba.data() + size_t(y) * out.width * 4, rgb->data[0] + size_t(y) * rgb->linesize[0],
-                        size_t(out.width) * 8);
-        return true;
+        uint8_t* dst[4] = {reinterpret_cast<uint8_t*>(out.rgba.data()), nullptr, nullptr, nullptr};
+        int dstStride[4] = {out.width * 8, 0, 0, 0};
+        return sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dst, dstStride) == frame->height;
     }
 };
 
@@ -124,13 +135,8 @@ bool MediaReader::open(const std::string& pathIn, std::string& err) {
     d->dec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     if ((r = avcodec_open2(d->dec, codec, nullptr)) < 0) { err = "decoder open failed: " + errStr(r); return false; }
 
-    d->sws = sws_alloc_context();
-    d->sws->flags = (SwsFlags)(SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP);
-    d->sws->dither = SWS_DITHER_NONE;
-    d->sws->threads = 0;
     d->pkt = av_packet_alloc();
     d->frame = av_frame_alloc();
-    d->rgb = av_frame_alloc();
 
     MediaInfo& mi = d->info;
     mi.width = st->codecpar->width;

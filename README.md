@@ -28,7 +28,9 @@ cd GoodHAPEncoder
 ./build-mac.sh
 ```
 
-The script installs FFmpeg, CMake and pkg-config through Homebrew if they're missing, then builds `goodhap-cli`. It takes a few minutes the first time.
+The script uses the FFmpeg you already have from Homebrew (version 5 or newer, including `ffmpeg@7` style installs) or installs it, adds CMake and pkg-config if they're missing, then builds `goodhap-cli`. It takes a few minutes the first time.
+
+If the build stops with an FFmpeg error, run `brew upgrade ffmpeg` and then `./build-mac.sh` again.
 
 **3. Make it a command you can run from anywhere** (optional, recommended):
 
@@ -122,7 +124,7 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-On macOS and Linux CMake uses the system FFmpeg 8+ through pkg-config; `build-mac.sh` does the whole thing on a Mac. The `macOS CLI` GitHub workflow builds and tests every change on Apple Silicon.
+On macOS and Linux CMake uses the system FFmpeg 5+ through pkg-config; `build-mac.sh` does the whole thing on a Mac. The `macOS CLI` GitHub workflow builds and tests every change on Apple Silicon against Homebrew's current FFmpeg, `ffmpeg@7` and `ffmpeg@6`.
 
 ## Notes
 

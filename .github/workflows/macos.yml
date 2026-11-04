@@ -17,12 +17,20 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        ffmpeg: [ffmpeg, ffmpeg@7, ffmpeg@6]
+    env:
+      GHAP_BREW_FFMPEG: ${{ matrix.ffmpeg }}
     steps:
       - uses: actions/checkout@v5
 
       - name: Build
-        run: ./build-mac.sh
+        run: |
+          ./build-mac.sh
+          echo "$(brew --prefix $GHAP_BREW_FFMPEG)/bin" >> "$GITHUB_PATH"
 
       - name: Smoke test
         run: |
@@ -47,6 +55,7 @@ jobs:
           ffmpeg -v error -i out/alpha_HapQAlpha.mov -f null -
 
       - uses: actions/upload-artifact@v5
+        if: matrix.ffmpeg == 'ffmpeg'
         with:
           name: goodhap-cli-macos-arm64
           path: build-mac/bin/goodhap-cli
