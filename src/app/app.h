@@ -33,6 +33,8 @@ struct UserSettings {
     int quality = 1; // Fast, Normal, High, Max
     float dither = 1.0f;
     bool animateDither = true;
+    float compact = 0.0f;
+    bool readOnly = false; // test captures: never write settings.ini
     std::string outputDir; // empty = next to the source
     int chunks = 0;
     bool snappy = true;
@@ -52,6 +54,8 @@ public:
     PreviewRenderer::Params& viewParams() { return view_; }
     void setFit(bool fit) { fit_ = fit; }
     void setPreviewFrame(int64_t f) { previewFrame_ = f; }
+    // Test captures: never write settings.ini; optionally override the size setting.
+    void setCaptureMode(float compact) { settings_.readOnly = true; if (compact >= 0) settings_.compact = compact; }
     // Test hook: start the queue once every item is probed; true when all are finished.
     bool autoEncodeStep();
 
@@ -99,6 +103,7 @@ private:
         uint64_t gen = 0;
         bool hasOurs = false, hasFFmpeg = false;
         ghap::Metrics ours, ffmpeg;
+        double oursBytes = 0, ffmpegBytes = 0; // one frame after snappy
     };
     std::thread previewThread_;
     std::mutex previewMutex_;

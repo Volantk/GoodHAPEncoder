@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "try") {
-        // ghap_eval try <source> c1,a4,s2,d0 ...  (colour radius, alpha radius, scale tries, dither)
+        // ghap_eval try <source> c1,a4,s2,d0,r1e-4 ...  (colour radius, alpha radius, scale tries, dither, rdo lambda)
         FrameView view{srcFrame.rgba.data(), srcFrame.width, srcFrame.height, srcFrame.width * 4};
         for (int i = 3; i < argc; ++i) {
             if (argv[i][0] == '-') { ++i; continue; }
@@ -236,6 +236,9 @@ int main(int argc, char** argv) {
                 else if (k == 'a') b.alphaRadius = int(v);
                 else if (k == 's') b.scaleTries = int(v);
                 else if (k == 'd') d = v;
+                else if (k == 'r') b.rdoLambda = v;
+                else if (k == 'w') b.rdoWindow = int(v);
+                else if (k == 'm') b.rdoMaskRef = v / 255.0f; // in 8-bit levels
                 p = e == std::string::npos ? spec.size() : e + 1;
             }
             b.ditherChroma = b.ditherLuma = b.ditherAlpha = d;
@@ -248,7 +251,16 @@ int main(int argc, char** argv) {
             encodeTextures(view, s, 0, t);
             double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             Metrics m = measure(src, imageFromTextures(t, srcFrame.width, srcFrame.height));
-            printf("%-14s psnr %6.2f  psnr8 %6.2f  smooth8 %6.2f  %7.1f ms\n", argv[i], m.psnr, m.psnr8, m.smooth8, ms);
+            std::vector<uint8_t> packed;
+            packHapFrame(t, s, packed);
+            double raw = double(t.ycocg.size() + t.alpha.size());
+            printf("%-20s psnr %6.2f  psnr8 %6.2f  smooth8 %6.2f  %7.1f ms  %7.1f KB (%3.0f%% of raw)\n", argv[i], m.psnr, m.psnr8,
+                   m.smooth8, ms, packed.size() / 1024.0, 100.0 * packed.size() / raw);
+            if (!dumpTo.empty()) {
+                std::string n = argv[i];
+                std::replace(n.begin(), n.end(), ',', '_');
+                dump(dumpTo + "/" + n, src, imageFromTextures(t, srcFrame.width, srcFrame.height));
+            }
         }
         return 0;
     }

@@ -53,6 +53,13 @@ jobs:
           ffprobe -v error -show_entries stream=codec_tag_string,nb_frames -of csv=p=0 out/alpha_HapQAlpha.mov | grep "HapM,25"
           # FFmpeg itself must decode what we wrote
           ffmpeg -v error -i out/alpha_HapQAlpha.mov -f null -
+          # --compact must shrink a textured clip, --estimate must run
+          ffmpeg -v error -f lavfi -i "testsrc2=s=640x360:d=1:r=25,noise=alls=3:allf=t" -c:v prores_ks noisy.mov
+          ../$B/goodhap-cli noisy.mov -o c0.mov --quality fast
+          ../$B/goodhap-cli noisy.mov -o c2.mov --quality fast --compact 2
+          ffmpeg -v error -i c2.mov -f null -
+          test $(stat -f %z c2.mov) -lt $(( $(stat -f %z c0.mov) * 6 / 10 ))
+          ../$B/goodhap-cli noisy.mov --estimate --quality fast
 
       - uses: actions/upload-artifact@v5
         if: matrix.ffmpeg == 'ffmpeg'

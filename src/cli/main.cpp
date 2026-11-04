@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "media_reader.h"
+#include "metrics.h"
 #include "transcode.h"
 
 extern "C" {
@@ -32,7 +33,12 @@ static void usage(FILE* f) {
         "                     input as <name>_HapQ.mov / <name>_HapQAlpha.mov\n"
         "  --format q|qa      force Hap Q or Hap Q Alpha (default: Alpha if the source has alpha)\n"
         "  --quality fast|normal|high|max   (default normal)\n"
-        "  --dither 0..1      dither strength (default 1, 0 = off)\n"
+        "  --compact 0..4     smaller files for some quality (default 0 = off).\n"
+        "                     1 ~ -30%%, 2 ~ -50%%, 3 ~ -65%% on camera footage (varies);\n"
+        "                     smooth gradients are protected at every level\n"
+        "  --estimate         don't encode: sample ~12 frames and print the projected\n"
+        "                     file size and quality for each --compact level\n"
+        "  --dither 0..1      dither strength (default 1, 0 = off; 0 also saves size on smooth content)\n"
         "  --static-dither    same noise pattern every frame\n"
         "  --chunks N         Hap chunks per texture (default auto)\n"
         "  --no-snappy        skip the snappy stage\n"
@@ -41,7 +47,87 @@ static void usage(FILE* f) {
         "examples:\n"
         "  goodhap-cli clip.mov\n"
         "  goodhap-cli --quality high *.mov -o ~/Desktop/hap\n"
-        "  goodhap-cli renders/shot_0001.exr -o shot.mov\n");
+        "  goodhap-cli renders/shot_0001.exr -o shot.mov\n"
+        "  goodhap-cli big.mov --estimate            # how big will it be?\n"
+        "  goodhap-cli big.mov --compact 2\n");
+}
+
+static std::string human(double bytes) {
+    char buf[32];
+    if (bytes >= 1024.0 * 1024 * 1024) snprintf(buf, sizeof buf, "%.1f GB", bytes / (1024.0 * 1024 * 1024));
+    else if (bytes >= 1024.0 * 1024) snprintf(buf, sizeof buf, "%.1f MB", bytes / (1024.0 * 1024));
+    else snprintf(buf, sizeof buf, "%.0f KB", bytes / 1024.0);
+    return buf;
+}
+
+// Encodes a spread of frames at each compact level and projects the file size.
+static bool estimate(const std::string& in, const EncoderSettings& base, bool forceFormat) {
+    MediaReader r;
+    std::string err;
+    if (!r.open(in, err)) { std::fprintf(stderr, "%s: %s\n", in.c_str(), err.c_str()); return false; }
+    const MediaInfo info = r.info();
+    const int64_t frames = std::max<int64_t>(1, info.frameCount);
+    const int samples = int(std::min<int64_t>(frames, 12));
+    std::error_code ec;
+    auto srcSize = fs::file_size(in, ec);
+    EncoderSettings s = base;
+    if (!forceFormat) s.format = info.hasAlpha ? HapFormat::HapQAlpha : HapFormat::HapQ;
+    std::printf("%s\n  %dx%d, %lld frames, %s%s\n  sampling %d frames...\n", in.c_str(), info.width, info.height, (long long)frames,
+                formatName(s.format), ec ? "" : (", source " + human(double(srcSize))).c_str(), samples);
+    std::fflush(stdout);
+
+    const float levels[] = {0, 1, 2, 3, 4};
+    const int nLevels = 5;
+    double bytes[nLevels] = {}, psnr[nLevels] = {}, lowf[nLevels] = {}, ffBytes = 0, ffPsnr = 0, ffLow = 0;
+    int done = 0, ffDone = 0;
+    std::vector<uint8_t> packed;
+    for (int k = 0; k < samples && !g_cancel; ++k) {
+        int64_t idx = samples == 1 ? 0 : (frames - 1) * k / (samples - 1);
+        Frame16 f;
+        if (idx > 0 && !r.seekFrame(idx)) continue;
+        if (!r.read(f)) continue;
+        ImageF src = imageFromFrame(f);
+        FrameView v{f.rgba.data(), f.width, f.height, f.width * 4};
+        for (int l = 0; l < nLevels; ++l) {
+            EncoderSettings ls = s;
+            ls.compact = levels[l];
+            EncodedTextures t;
+            encodeTextures(v, ls, int(idx), t);
+            packHapFrame(t, ls, packed);
+            Metrics m = measure(src, imageFromTextures(t, f.width, f.height));
+            bytes[l] += double(packed.size());
+            psnr[l] += m.psnr;
+            lowf[l] += m.smooth8;
+        }
+        if (s.format == HapFormat::HapQ) {
+            EncodedTextures t;
+            if (ffmpegHapQReference(f, t)) {
+                packHapFrame(t, s, packed);
+                Metrics m = measure(src, imageFromTextures(t, f.width, f.height));
+                ffBytes += double(packed.size());
+                ffPsnr += m.psnr;
+                ffLow += m.smooth8;
+                ++ffDone;
+            }
+        }
+        ++done;
+        std::fprintf(stderr, "\r  %d/%d", done, samples);
+    }
+    std::fprintf(stderr, "\r       \r");
+    if (!done) { std::fprintf(stderr, "  could not read any frames\n"); return false; }
+    std::printf("  %-14s %12s %12s %8s %9s\n", "", "per frame", "whole clip", "PSNR", "low-freq");
+    for (int l = 0; l < nLevels; ++l) {
+        char name[32];
+        snprintf(name, sizeof name, l ? "--compact %d" : "default", int(levels[l]));
+        std::printf("  %-14s %12s %12s %7.1f %8.1f%s\n", name, human(bytes[l] / done).c_str(), human(bytes[l] / done * frames).c_str(),
+                    psnr[l] / done, lowf[l] / done, float(l) == s.compact ? "   <- chosen" : "");
+    }
+    if (ffDone)
+        std::printf("  %-14s %12s %12s %7.1f %8.1f\n", "FFmpeg hap_q", human(ffBytes / ffDone).c_str(),
+                    human(ffBytes / ffDone * frames).c_str(), ffPsnr / ffDone, ffLow / ffDone);
+    std::printf("  PSNR in dB vs the source (higher is better). Low-freq: the same after a blur,\n"
+                "  i.e. banding and blotches. Sizes are projected from the sampled frames.\n");
+    return true;
 }
 
 static bool hasMovExt(const std::string& s) {
@@ -58,7 +144,7 @@ int main(int argc, char** argv) {
     std::string output;
     EncoderSettings settings;
     settings.quality = Quality::Normal;
-    bool forceFormat = false;
+    bool forceFormat = false, estimateOnly = false;
     int64_t maxFrames = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -82,6 +168,8 @@ int main(int argc, char** argv) {
             else if (q == "max") settings.quality = Quality::Max;
             else { std::fprintf(stderr, "--quality is fast, normal, high or max\n"); return 2; }
         } else if (a == "--dither") settings.dither = float(std::atof(next().c_str()));
+        else if (a == "--compact") settings.compact = std::clamp(float(std::atof(next().c_str())), 0.0f, 4.0f);
+        else if (a == "--estimate") estimateOnly = true;
         else if (a == "--static-dither") settings.animateDither = false;
         else if (a == "--chunks") settings.chunks = std::atoi(next().c_str());
         else if (a == "--no-snappy") settings.snappy = false;
@@ -107,6 +195,12 @@ int main(int argc, char** argv) {
     }
 
     std::signal(SIGINT, [](int) { g_cancel = true; });
+
+    if (estimateOnly) {
+        int failedEst = 0;
+        for (const auto& in : inputs) failedEst += estimate(in, settings, forceFormat) ? 0 : 1;
+        return failedEst ? 1 : 0;
+    }
 
     int failed = 0;
     for (size_t n = 0; n < inputs.size() && !g_cancel; ++n) {

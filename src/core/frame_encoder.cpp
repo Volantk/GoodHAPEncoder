@@ -1,6 +1,7 @@
 #include "frame_encoder.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "bluenoise.h"
 #include "parallel.h"
@@ -21,10 +22,15 @@ BlockSettings blockSettingsFor(const EncoderSettings& s) {
     if (s.blockOverride) return *s.blockOverride;
     BlockSettings b;
     switch (s.quality) {
-    case Quality::Fast: b.colorRadius = 1; b.alphaRadius = 3; b.scaleTries = 1; break;
-    case Quality::Normal: b.colorRadius = 1; b.alphaRadius = 5; b.scaleTries = 2; break;
-    case Quality::High: b.colorRadius = 1; b.alphaRadius = 8; b.scaleTries = 4; break;
-    case Quality::Max: b.colorRadius = 2; b.alphaRadius = 10; b.scaleTries = 4; break;
+    case Quality::Fast: b.colorRadius = 1; b.alphaRadius = 3; b.scaleTries = 1; b.rdoWindow = 8; break;
+    case Quality::Normal: b.colorRadius = 1; b.alphaRadius = 5; b.scaleTries = 2; b.rdoWindow = 16; break;
+    case Quality::High: b.colorRadius = 1; b.alphaRadius = 8; b.scaleTries = 4; b.rdoWindow = 32; break;
+    case Quality::Max: b.colorRadius = 2; b.alphaRadius = 10; b.scaleTries = 4; b.rdoWindow = 64; break;
+    }
+    if (s.compact > 0) {
+        // Measured on DSLR footage: 1 ~ -30%, 2 ~ -50%, 3 ~ -65% vs off.
+        b.rdoLambda = 1e-4f * std::pow(3.0f, std::min(s.compact, 4.0f));
+        b.rdoMaskRef = 2.0f / 255.0f;
     }
     b.ditherChroma = b.ditherLuma = b.ditherAlpha = s.dither;
     b.alphaWeighted = s.format == HapFormat::HapQAlpha;
@@ -67,7 +73,10 @@ void encodeTextures(const FrameView& src, const EncoderSettings& s, int frameInd
                 }
             }
             size_t b = size_t(by) * bw + bx;
-            encodeHapQBlock(in, bs, out.ycocg.data() + b * 16);
+            uint8_t* blk = out.ycocg.data() + b * 16;
+            in.prev = bx > 0 ? blk - 16 : nullptr;
+            in.prevCount = bx;
+            encodeHapQBlock(in, bs, blk);
             if (alpha) {
                 float a[16];
                 for (int i = 0; i < 16; ++i) {
@@ -78,7 +87,21 @@ void encodeTextures(const FrameView& src, const EncoderSettings& s, int frameInd
                     }
                     a[i] = v;
                 }
-                encodeBC4Block(a, nullptr, bs.alphaRadius, out.alpha.data() + b * 8);
+                uint8_t* ablk = out.alpha.data() + b * 8;
+                encodeBC4Block(a, nullptr, bs.alphaRadius, ablk);
+                if (bs.rdoLambda > 0 && bx > 0) {
+                    // Same gradient protection as colour (see rdoMaskRef).
+                    float lambda = bs.rdoLambda;
+                    if (bs.rdoMaskRef > 0) {
+                        float m = 0, v = 0;
+                        for (int i = 0; i < 16; ++i) m += in.a[i];
+                        m /= 16;
+                        for (int i = 0; i < 16; ++i) v += (in.a[i] - m) * (in.a[i] - m);
+                        float sigma = std::sqrt(v / 16) / bs.rdoMaskRef;
+                        lambda *= std::min(1.0f, sigma * sigma);
+                    }
+                    if (lambda > 0) rdoBC4Block(ablk, a, nullptr, 1.0f, lambda, ablk - 8, 8, std::min(bx, bs.rdoWindow));
+                }
             }
         }
     });

@@ -1,6 +1,8 @@
 #include "block_encode.h"
 
 #include <algorithm>
+
+#include "block_decode.h"
 #include <cmath>
 #include <cstring>
 
@@ -276,7 +278,151 @@ inline float edgeFade(float v) {
     return std::clamp(std::min(v, 1.0f - v) * 255.0f, 0.0f, 1.0f);
 }
 
+// ---------------------------------------------------------------------------
+// Size optimisation (RDO for snappy)
+//
+// Hap's second stage is snappy, which only shrinks data that repeats: a run of
+// 4+ bytes seen within the last 64 KB costs ~2-3 bytes instead of itself. Each
+// block half is 8 bytes: endpoints, then index bits. After the best fit is
+// found, these candidates reuse bytes of blocks just to the left in the same
+// row (deterministic, and rows encode in parallel):
+//   whole half copied            ~2 bytes
+//   index bits copied, own endpoints refit to them   ~4-6 bytes
+//   colour endpoints copied, own indices             ~6 bytes
+//   flat luma block (zero index bits, which repeat everywhere)  ~3 bytes
+// The candidate with the lowest error + lambda * bytes wins. Byte costs are
+// estimates of what snappy pays; the real saving is measured, not assumed.
+
+constexpr float kCostNew = 8, kCostCopy = 2, kCostBC4Index = 4, kCostColorPart = 6, kCostFlat = 3;
+
+inline float bc4Err(const uint8_t blk[8], const float v[16], const float* w) {
+    float d[16];
+    decodeBC4Block(blk, d);
+    float e = 0;
+    for (int i = 0; i < 16; ++i) e += (d[i] - v[i]) * (d[i] - v[i]) * (w ? w[i] : 1.0f);
+    return e;
+}
+
+// Squared RGB error of a colour half against the block's Co/Cg, assuming luma
+// absorbs the mean (see the Y target below): 2 dCo^2 + 8/3 dCg^2.
+inline float chromaErr(const uint8_t half[8], const float Co[16], const float Cg[16], const float w[16]) {
+    float c[48];
+    decodeBC1Block(half, c, true);
+    float e = 0;
+    for (int i = 0; i < 16; ++i) {
+        float s = c[i * 3 + 2] * (255.0f / 8.0f) + 1.0f;
+        float dco = (c[i * 3] - kOffset) / s - Co[i], dcg = (c[i * 3 + 1] - kOffset) / s - Cg[i];
+        e += w[i] * (2.0f * dco * dco + (8.0f / 3.0f) * dcg * dcg);
+    }
+    return e;
+}
+
+inline uint16_t rd16(const uint8_t* p) { return uint16_t(p[0] | (p[1] << 8)); }
+
+void rdoColorHalf(uint8_t half[8], const ColorTargets& t, int scale, const float Co[16], const float Cg[16], const float w[16],
+                  float lambda, const uint8_t* prevBlock, int prevCount) {
+    float bestJ = chromaErr(half, Co, Cg, w) + lambda * kCostNew;
+    uint8_t best[8];
+    std::memcpy(best, half, 8);
+    auto consider = [&](const uint8_t cand[8], float cost) {
+        float j = chromaErr(cand, Co, Cg, w) + lambda * cost;
+        if (j < bestJ) { bestJ = j; std::memcpy(best, cand, 8); }
+    };
+    static const uint8_t idxToStep[4] = {0, 3, 1, 2};
+    for (int k = 0; k < prevCount; ++k) {
+        const uint8_t* c = prevBlock - 16 * k + 8;
+        consider(c, kCostCopy);
+
+        // Their endpoints, our best indices for them.
+        {
+            uint8_t cand[8];
+            std::memcpy(cand, c, 4);
+            uint32_t bits = 0;
+            if (rd16(c) != rd16(c + 2)) {
+                float pal[48];
+                uint8_t probe[8];
+                std::memcpy(probe, c, 4);
+                probe[4] = 0xE4; probe[5] = probe[6] = probe[7] = 0; // indices 0,1,2,3 for the first four pixels
+                decodeBC1Block(probe, pal, true);
+                float s = pal[2] * (255.0f / 8.0f) + 1.0f;
+                for (int i = 0; i < 16; ++i) {
+                    float bestD = 1e30f;
+                    int bi = 0;
+                    for (int p = 0; p < 4; ++p) {
+                        float dco = (pal[p * 3] - kOffset) / s - Co[i], dcg = (pal[p * 3 + 1] - kOffset) / s - Cg[i];
+                        float d = 2.0f * dco * dco + (8.0f / 3.0f) * dcg * dcg;
+                        if (d < bestD) { bestD = d; bi = p; }
+                    }
+                    bits |= uint32_t(bi) << (2 * i);
+                }
+            }
+            for (int i = 0; i < 4; ++i) cand[4 + i] = uint8_t(bits >> (8 * i));
+            consider(cand, kCostColorPart);
+        }
+
+        // Their index bits, our endpoints refit to them (at our scale).
+        {
+            uint32_t bits = uint32_t(c[4] | (c[5] << 8) | (c[6] << 16) | (uint32_t(c[7]) << 24));
+            uint8_t step[16];
+            for (int i = 0; i < 16; ++i) step[i] = idxToStep[(bits >> (2 * i)) & 3];
+            float x0, y0, x1, y1;
+            if (colorLsq(t, step, x0, y0, x1, y1)) {
+                int b = scale - 1;
+                uint16_t c0 = uint16_t((nearest5(std::clamp(x0, 0.f, 1.f)) << 11) | (nearest6(std::clamp(y0, 0.f, 1.f)) << 5) | b);
+                uint16_t c1 = uint16_t((nearest5(std::clamp(x1, 0.f, 1.f)) << 11) | (nearest6(std::clamp(y1, 0.f, 1.f)) << 5) | b);
+                // Keep c0 > c1: some old GPUs decode DXT5 colour like DXT1, where c0 <= c1 means 3-colour mode.
+                if (c0 > c1) {
+                    uint8_t cand[8] = {uint8_t(c0), uint8_t(c0 >> 8), uint8_t(c1), uint8_t(c1 >> 8), c[4], c[5], c[6], c[7]};
+                    consider(cand, kCostColorPart);
+                }
+            }
+        }
+    }
+    std::memcpy(half, best, 8);
+}
+
 } // namespace
+
+void rdoBC4Block(uint8_t blk[8], const float v[16], const float* w, float errScale, float lambda, const uint8_t* prev, int stride,
+                 int prevCount) {
+    float bestJ = errScale * bc4Err(blk, v, w) + lambda * kCostNew;
+    uint8_t best[8];
+    std::memcpy(best, blk, 8);
+    auto consider = [&](const uint8_t cand[8], float cost) {
+        float j = errScale * bc4Err(cand, v, w) + lambda * cost;
+        if (j < bestJ) { bestJ = j; std::memcpy(best, cand, 8); }
+    };
+    {
+        float sw = 0, sv = 0;
+        for (int i = 0; i < 16; ++i) { float wi = w ? w[i] : 1.0f; sw += wi; sv += wi * v[i]; }
+        uint8_t a = uint8_t(std::clamp(int(sv / sw * 255.0f + 0.5f), 0, 255));
+        uint8_t flat[8] = {a, a, 0, 0, 0, 0, 0, 0};
+        consider(flat, kCostFlat);
+    }
+    for (int k = 0; k < prevCount; ++k) {
+        const uint8_t* c = prev - stride * k;
+        consider(c, kCostCopy);
+        // Their index bits, our endpoints: least squares in 8-level mode.
+        uint64_t bits = 0;
+        for (int i = 0; i < 6; ++i) bits |= uint64_t(c[2 + i]) << (8 * i);
+        float aa = 0, ab = 0, bb = 0, av = 0, bv = 0;
+        for (int i = 0; i < 16; ++i) {
+            int idx = int((bits >> (3 * i)) & 7);
+            float f1 = idx == 0 ? 0.0f : idx == 1 ? 1.0f : (idx - 1) / 7.0f; // weight of a1
+            float f0 = 1.0f - f1, wi = w ? w[i] : 1.0f;
+            aa += wi * f0 * f0; ab += wi * f0 * f1; bb += wi * f1 * f1;
+            av += wi * f0 * v[i]; bv += wi * f1 * v[i];
+        }
+        float det = aa * bb - ab * ab;
+        if (std::fabs(det) < 1e-8f) continue;
+        int a0 = std::clamp(int((av * bb - bv * ab) / det * 255.0f + 0.5f), 0, 255);
+        int a1 = std::clamp(int((bv * aa - av * ab) / det * 255.0f + 0.5f), 0, 255);
+        if (a0 <= a1) continue; // would switch to 6-level mode and change the meaning of the indices
+        uint8_t cand[8] = {uint8_t(a0), uint8_t(a1), c[2], c[3], c[4], c[5], c[6], c[7]};
+        consider(cand, kCostBC4Index);
+    }
+    std::memcpy(blk, best, 8);
+}
 
 void encodeBC4Block(const float v[16], const float* weights, int radius, uint8_t out[8]) {
     BC4Result r;
@@ -305,6 +451,7 @@ void encodeHapQBlock(const BlockInput& in, const BlockSettings& s, uint8_t out[1
     ColorFit best;
     best.err = 1e30f;
     int bestScale = 1;
+    ColorTargets bestTargets;
     for (int sc = maxScale; sc >= minScale; --sc) {
         ColorTargets t;
         float inv = 1.0f / float(sc * sc);
@@ -322,17 +469,44 @@ void encodeHapQBlock(const BlockInput& in, const BlockSettings& s, uint8_t out[1
         }
         ColorFit f;
         colorFit(t, s.colorRadius, f);
-        if (f.err < best.err) { best = f; bestScale = sc; }
+        if (f.err < best.err) { best = f; bestScale = sc; bestTargets = t; }
+    }
+    uint8_t color[8];
+    colorPack(best, bestScale, color);
+    float lambda = s.rdoLambda;
+    if (lambda > 0 && s.rdoMaskRef > 0) {
+        float m[3] = {}, v = 0;
+        for (int i = 0; i < 16; ++i) { m[0] += in.r[i]; m[1] += in.g[i]; m[2] += in.b[i]; }
+        for (auto& x : m) x /= 16;
+        for (int i = 0; i < 16; ++i) {
+            float dr = in.r[i] - m[0], dg = in.g[i] - m[1], db = in.b[i] - m[2];
+            v += dr * dr + dg * dg + db * db;
+        }
+        float sigma = std::sqrt(v / 48.0f);
+        lambda *= std::min(1.0f, (sigma / s.rdoMaskRef) * (sigma / s.rdoMaskRef));
+    }
+    const bool rdo = lambda > 0 && in.prev && in.prevCount > 0;
+    const int window = std::min(in.prevCount, s.rdoWindow);
+    if (rdo) {
+        // Score candidates against the (dithered) targets the best fit was made
+        // for; otherwise reuse would win just by removing the dither.
+        float coT[16], cgT[16];
+        for (int i = 0; i < 16; ++i) {
+            coT[i] = (bestTargets.x[i] - kOffset) / bestScale;
+            cgT[i] = (bestTargets.y[i] - kOffset) / bestScale;
+        }
+        rdoColorHalf(color, bestTargets, bestScale, coT, cgT, w, lambda, in.prev, window);
     }
 
     // Luma target compensates the decoded chroma error: for RGB = Y + f(Co, Cg)
     // the least squares Y is Y + (Cg' - Cg) / 3.
     float yt[16], yw[16];
     {
-        float x0 = T.g6[best.g0], x1 = T.g6[best.g1];
-        float py[4] = {x0, (2 * x0 + x1) / 3, (x0 + 2 * x1) / 3, x1};
+        float c[48];
+        decodeBC1Block(color, c, true);
         for (int i = 0; i < 16; ++i) {
-            float cgDecoded = (py[best.step[i]] - kOffset) / bestScale;
+            float sc = c[i * 3 + 2] * (255.0f / 8.0f) + 1.0f;
+            float cgDecoded = (c[i * 3 + 1] - kOffset) / sc;
             float v = Y[i] + (cgDecoded - Cg[i]) / 3.0f;
             if (in.noiseY) v += in.noiseY[i] * s.ditherLuma / 255.0f * edgeFade(v);
             yt[i] = std::clamp(v, 0.0f, 1.0f);
@@ -340,7 +514,9 @@ void encodeHapQBlock(const BlockInput& in, const BlockSettings& s, uint8_t out[1
         }
     }
     encodeBC4Block(yt, yw, s.alphaRadius, out);
-    colorPack(best, bestScale, out + 8);
+    // A luma error shows in all three channels, hence errScale 3.
+    if (rdo) rdoBC4Block(out, yt, yw, 3.0f, lambda, in.prev, 16, window);
+    std::memcpy(out + 8, color, 8);
 }
 
 } // namespace ghap

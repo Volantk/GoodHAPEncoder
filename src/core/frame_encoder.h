@@ -16,6 +16,9 @@ struct EncoderSettings {
     Quality quality = Quality::High;
     float dither = 1.0f;       // master dither strength, 0 = off
     bool animateDither = true; // new noise pattern every frame
+    // Smaller files for some quality, 0 (off) to 4. Each step triples how much
+    // error a saved byte may cost; smooth gradients are protected at every level.
+    float compact = 0.0f;
     int chunks = 0;            // 0 = auto
     bool snappy = true;
     const BlockSettings* blockOverride = nullptr; // experiments: replaces the quality preset

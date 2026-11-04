@@ -69,6 +69,8 @@ Inputs: anything FFmpeg reads. That includes ProRes (with alpha), DNxHR, H.264/H
 |---|---|
 | `-o PATH` | output file (one input) or folder. Default: next to each input |
 | `--quality fast\|normal\|high\|max` | how hard to search. Default `normal`. `high` for finals, `max` mostly for stills |
+| `--compact 0..4` | smaller files for some quality, see below. Default `0` (off) |
+| `--estimate` | don't encode; print the projected file size and quality for each `--compact` level |
 | `--dither 0..1` | fine noise that hides banding in gradients. Default `1`. Use `0` for flat graphics and text |
 | `--static-dither` | same noise every frame instead of a new pattern per frame (for loops that must match) |
 | `--format q\|qa` | force Hap Q or Hap Q Alpha. Default: Alpha only when the source has an alpha channel |
@@ -77,6 +79,30 @@ Inputs: anything FFmpeg reads. That includes ProRes (with alpha), DNxHR, H.264/H
 | `--no-snappy` | skip the lossless snappy stage: bigger files, slightly less CPU in the player |
 
 Ctrl-C stops and deletes the unfinished file. Audio is not copied.
+
+### Keeping files small
+
+Hap Q stores about 1 byte per pixel per frame, so a Hap Q file is usually 2-3x the size of the ProRes it came from. The lossless snappy stage only shrinks parts of the picture that repeat. `--compact` makes neighbouring 4x4 blocks reuse each other's bytes where that costs little quality, so snappy can shrink them. Smooth gradients are protected at every level: reuse there would make bands.
+
+Check before you encode a big file. This samples a dozen frames and takes under a minute:
+
+```
+goodhap big.mov --estimate
+```
+
+Example: 48 frames of 1080p DSLR footage from a 44 MB ProRes 422 HQ file:
+
+```
+                  per frame   whole clip     PSNR  low-freq
+default              1.9 MB      93.5 MB    52.1     68.4
+--compact 1          1.4 MB      65.8 MB    48.8     60.1
+--compact 2          943 KB      44.2 MB    45.0     53.9
+--compact 3          684 KB      32.1 MB    41.6     48.4
+--compact 4          530 KB      24.8 MB    38.3     43.5
+FFmpeg hap_q         1.5 MB      70.9 MB    44.3     48.7
+```
+
+`--compact 2` lands at the ProRes size and still scores better than FFmpeg's encoder at 1.6x the size. Level 1 looks the same as off; at 2, block edges start to show in blurred areas when you push the contrast; at 3 and 4 they show at normal contrast. How much each level saves depends on the footage, so run `--estimate` on your own clip. Heavy film grain or sensor noise saves the least: every block is different, so there is little to reuse (a test clip with strong noise only shrank 8% at level 2, against 57-66% with light to moderate grain). `--dither 0` saves more on smooth, clean content (renders, graphics).
 
 Encoding is CPU work and slower than FFmpeg: on a 24-thread PC, a 3360x1890 clip runs at about 6 fps on `fast`, 3 fps on `normal` and 1.8 fps on `high`. 1080p is roughly three times faster.
 
@@ -111,7 +137,7 @@ Run `GoodHAP.exe` and drop videos, image sequences (one frame or the folder) or 
 - wheel: zoom around the cursor (pixel-exact), drag: pan, double-click: 100% / fit, `F`: fit
 - left/right arrows: step frames
 
-The preview uploads real BC3/BC4 textures and decodes them on the GPU with the Hap Q shader, so it shows what a player shows.
+The preview uploads real BC3/BC4 textures and decodes them on the GPU with the Hap Q shader, so it shows what a player shows. Under it: quality against the source, the frame's size and the projected clip size, so you can drag the Smaller files slider and see the trade.
 
 ### Build on Windows
 

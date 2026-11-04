@@ -197,7 +197,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     std::wstring capturePath;
     int capW = 1440, capH = 900, capView = -1;
     bool capDiff = false, capEncode = false;
-    float capZoom = 0, capCx = 0, capCy = 0, capExposure = 0;
+    float capZoom = 0, capCx = 0, capCy = 0, capExposure = 0, capCompact = -1;
     long long capFrame = 0;
     {
         int argc = 0;
@@ -213,6 +213,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
             else if (a == L"--zoom") { capZoom = float(num()); capCx = float(num()); capCy = float(num()); }
             else if (a == L"--frame") capFrame = (long long)num();
             else if (a == L"--exposure") capExposure = float(num());
+            else if (a == L"--compact") capCompact = float(num());
             else files.push_back(a);
         }
         if (argv) LocalFree(argv);
@@ -250,6 +251,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     // Files passed on the command line (or dropped on the exe) start in the queue.
     if (!files.empty()) g_app.addPaths(files);
     if (capture) {
+        g_app.setCaptureMode(capCompact);
         auto& v = g_app.viewParams();
         if (capView >= 0) v.view = PreviewRenderer::View(capView);
         v.difference = capDiff;

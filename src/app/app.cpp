@@ -50,6 +50,14 @@ static bool isStillExt(std::string e) {
     return v.count(e) > 0;
 }
 
+static std::string humanSize(double bytes) {
+    char buf[32];
+    if (bytes >= 1024.0 * 1024 * 1024) snprintf(buf, sizeof buf, "%.1f GB", bytes / (1024.0 * 1024 * 1024));
+    else if (bytes >= 1024.0 * 1024) snprintf(buf, sizeof buf, "%.1f MB", bytes / (1024.0 * 1024));
+    else snprintf(buf, sizeof buf, "%.0f KB", bytes / 1024.0);
+    return buf;
+}
+
 static std::string formatDuration(double s) {
     if (s < 0 || !std::isfinite(s)) return "?";
     int t = int(s + 0.5);
@@ -92,6 +100,7 @@ void UserSettings::load() {
         else if (k == "quality") quality = std::clamp(atoi(v.c_str()), 0, 3);
         else if (k == "dither") dither = std::clamp(float(atof(v.c_str())), 0.f, 1.f);
         else if (k == "animateDither") animateDither = v == "1";
+        else if (k == "compact") compact = std::clamp(float(atof(v.c_str())), 0.f, 4.f);
         else if (k == "outputDir") outputDir = v;
         else if (k == "chunks") chunks = std::clamp(atoi(v.c_str()), 0, 64);
         else if (k == "snappy") snappy = v == "1";
@@ -99,10 +108,12 @@ void UserSettings::load() {
 }
 
 void UserSettings::save() const {
+    if (readOnly) return;
     std::error_code ec;
     fs::create_directories(settingsPath().parent_path(), ec);
     std::ofstream f(settingsPath());
     f << "format=" << format << "\nquality=" << quality << "\ndither=" << dither << "\nanimateDither=" << animateDither
+      << "\ncompact=" << compact
       << "\noutputDir=" << outputDir << "\nchunks=" << chunks << "\nsnappy=" << snappy << "\n";
 }
 
@@ -112,6 +123,7 @@ EncoderSettings UserSettings::encoder(bool sourceHasAlpha) const {
     s.quality = Quality(quality);
     s.dither = dither;
     s.animateDither = animateDither;
+    s.compact = compact;
     s.chunks = chunks;
     s.snappy = snappy;
     return s;
@@ -339,8 +351,8 @@ void App::requestPreview() {
     r.frame = std::clamp<int64_t>(previewFrame_, 0, std::max<int64_t>(0, item->info.frameCount - 1));
     r.settings = settings_.encoder(item->info.hasAlpha);
     char key[512];
-    snprintf(key, sizeof key, "%s|%lld|%d|%d|%.3f|%d", r.path.c_str(), (long long)r.frame, int(r.settings.format),
-             int(r.settings.quality), r.settings.dither, int(r.settings.animateDither));
+    snprintf(key, sizeof key, "%s|%lld|%d|%d|%.3f|%d|%.2f", r.path.c_str(), (long long)r.frame, int(r.settings.format),
+             int(r.settings.quality), r.settings.dither, int(r.settings.animateDither), r.settings.compact);
     if (lastRequestKey_ == key) return;
     lastRequestKey_ = key;
     r.gen = ++previewGen_;
@@ -360,7 +372,9 @@ void App::previewLoop() {
     ImageF srcImage;
     EncodedTextures ffTex;
     Metrics ffMetrics{};
+    double ffBytes = 0;
     bool ffOk = false;
+    std::vector<uint8_t> packed;
 
     for (;;) {
         PreviewRequest req;
@@ -422,8 +436,13 @@ void App::previewLoop() {
             m.gen = req.gen;
             m.ours = measure(srcImage, imageFromTextures(oursCopy, src.width, src.height));
             m.hasOurs = true;
-            if (newSource && ffOk) ffMetrics = measure(srcImage, imageFromTextures(ffTex, src.width, src.height));
+            if (packHapFrame(oursCopy, req.settings, packed)) m.oursBytes = double(packed.size());
+            if (newSource && ffOk) {
+                ffMetrics = measure(srcImage, imageFromTextures(ffTex, src.width, src.height));
+                ffBytes = packHapFrame(ffTex, req.settings, packed) ? double(packed.size()) : 0;
+            }
             m.ffmpeg = ffMetrics;
+            m.ffmpegBytes = ffBytes;
             m.hasFFmpeg = ffOk;
             std::lock_guard l(previewMutex_);
             previewMetrics_ = m;
@@ -673,6 +692,13 @@ void App::drawSettings() {
     dimText("Fine blue noise instead of banding in gradients. Pure black, white and opaque stay exact.");
 
     ImGui::Dummy(ImVec2(0, groupGap - ImGui::GetStyle().ItemSpacing.y));
+    ImGui::TextUnformatted("Smaller files");
+    ImGui::SetNextItemWidth(w);
+    changed |= ImGui::SliderFloat("##compact", &settings_.compact, 0.0f, 4.0f, settings_.compact <= 0 ? "Off" : "%.1f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lets blocks reuse bytes of their neighbours so the file compresses better.\nThe preview shows the frame size it gives.");
+    dimText("Trades quality for size: about -30%% at 1, -50%% at 2, -65%% at 3 on camera footage. Smooth gradients are protected.");
+
+    ImGui::Dummy(ImVec2(0, groupGap - ImGui::GetStyle().ItemSpacing.y));
     ImGui::TextUnformatted("Output");
     ImGui::Dummy(ImVec2(0, labelGap - ImGui::GetStyle().ItemSpacing.y));
     {
@@ -866,14 +892,19 @@ void App::drawPreview() {
             ImGui::AlignTextToFramePadding();
             ImGui::BeginGroup();
             if (m.hasOurs && m.gen == previewGen_) {
+                const int64_t frames = std::max<int64_t>(1, item->info.frameCount);
                 ImGui::Text("GoodHAP  %.1f dB", m.ours.psnr);
                 ImGui::SameLine();
-                dimText("(low-freq %.1f dB)", m.ours.smooth8);
+                if (frames > 1)
+                    dimText("(low-freq %.1f)  %s/frame, clip ~%s", m.ours.smooth8, humanSize(m.oursBytes).c_str(),
+                            humanSize(m.oursBytes * frames).c_str());
+                else
+                    dimText("(low-freq %.1f)  %s", m.ours.smooth8, humanSize(m.oursBytes).c_str());
                 if (m.hasFFmpeg) {
                     ImGui::SameLine(0, 24 * dpi_);
                     ImGui::Text("FFmpeg  %.1f dB", m.ffmpeg.psnr);
                     ImGui::SameLine();
-                    dimText("(low-freq %.1f dB)", m.ffmpeg.smooth8);
+                    dimText("(low-freq %.1f)  %s/frame", m.ffmpeg.smooth8, humanSize(m.ffmpegBytes).c_str());
                 }
                 ImGui::SameLine(0, 24 * dpi_);
                 dimText("frame encoded in %.0f ms", previewEncodeMs_);
