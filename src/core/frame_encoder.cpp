@@ -1,10 +1,9 @@
 #include "frame_encoder.h"
 
 #include <algorithm>
-#include <execution>
-#include <numeric>
 
 #include "bluenoise.h"
+#include "parallel.h"
 extern "C" {
 #include "hap.h"
 }
@@ -45,9 +44,7 @@ void encodeTextures(const FrameView& src, const EncoderSettings& s, int frameInd
     const bool dither = s.dither > 0;
     const int nf = s.animateDither ? frameIndex : 0;
 
-    std::vector<int> rows(bh);
-    std::iota(rows.begin(), rows.end(), 0);
-    std::for_each(std::execution::par, rows.begin(), rows.end(), [&](int by) {
+    parallelFor(bh, [&](int by) {
         BlockInput in;
         float nco[16], ncg[16], ny[16], na[16];
         in.hasAlpha = alpha;
@@ -113,10 +110,8 @@ bool packHapFrame(const EncodedTextures& tex, const EncoderSettings& s, std::vec
     return true;
 }
 
-static void serialDecode(HapDecodeWorkFunction fn, void* p, unsigned int count, void*) {
-    std::vector<unsigned> idx(count);
-    std::iota(idx.begin(), idx.end(), 0u);
-    std::for_each(std::execution::par, idx.begin(), idx.end(), [&](unsigned i) { fn(p, i); });
+static void parallelDecode(HapDecodeWorkFunction fn, void* p, unsigned int count, void*) {
+    parallelFor(int(count), [&](int i) { fn(p, unsigned(i)); });
 }
 
 bool unpackHapFrame(const uint8_t* data, size_t size, int width, int height, EncodedTextures& out, std::string* err) {
@@ -141,7 +136,7 @@ bool unpackHapFrame(const uint8_t* data, size_t size, int width, int height, Enc
         }
         unsigned long used = 0;
         unsigned outFmt = 0;
-        unsigned r = HapDecode(data, (unsigned long)size, i, serialDecode, nullptr, dst->data(),
+        unsigned r = HapDecode(data, (unsigned long)size, i, parallelDecode, nullptr, dst->data(),
                                (unsigned long)dst->size(), &used, &outFmt);
         if (r != HapResult_No_Error) {
             if (err) *err = "HapDecode failed";

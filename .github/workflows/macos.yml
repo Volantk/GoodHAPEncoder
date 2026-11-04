@@ -1,0 +1,49 @@
+name: macOS CLI
+
+# Builds goodhap-cli on an Apple Silicon runner and checks it end to end.
+# Manual, or on pushes that touch the portable code (macOS minutes are expensive).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/core/**"
+      - "src/cli/**"
+      - "tools/eval/**"
+      - "CMakeLists.txt"
+      - "build-mac.sh"
+      - ".github/workflows/macos.yml"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: ./build-mac.sh
+
+      - name: Smoke test
+        run: |
+          set -ex
+          B=build-mac/bin
+          mkdir -p t && cd t
+          ../$B/goodhap-cli --help
+          ../$B/ghap_eval gen sky sky.png 1280 720
+          ../$B/goodhap-cli sky.png --quality normal
+          ffprobe -v error -show_entries stream=codec_tag_string -of csv=p=0 sky_HapQ.mov | grep -x HapY
+          ../$B/ghap_eval metrics sky.png sky_HapQ.mov | tee metrics.txt
+          # psnr must beat FFmpeg-level quality (FFmpeg's hap_q gets ~45 dB here)
+          awk '{ if ($3 < 52) { print "psnr too low: " $3; exit 1 } }' metrics.txt
+          # 10-bit ProRes with alpha -> Hap Q Alpha, several frames, output folder
+          ffmpeg -v error -f lavfi -i "testsrc2=s=640x360:d=1:r=25,format=yuva444p10le" -c:v prores_ks -profile:v 4444 alpha.mov
+          ../$B/goodhap-cli alpha.mov -o out --quality fast
+          ffprobe -v error -show_entries stream=codec_tag_string,nb_frames -of csv=p=0 out/alpha_HapQAlpha.mov | grep "HapM,25"
+          # FFmpeg itself must decode what we wrote
+          ffmpeg -v error -i out/alpha_HapQAlpha.mov -f null -
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goodhap-cli-macos-arm64
+          path: build-mac/bin/goodhap-cli

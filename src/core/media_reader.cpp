@@ -1,6 +1,8 @@
 #include "media_reader.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <regex>

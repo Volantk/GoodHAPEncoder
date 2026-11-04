@@ -1,5 +1,7 @@
 #include "mov_writer.h"
 
+#include <cstring>
+
 extern "C" {
 #include <libavformat/avformat.h>
 }

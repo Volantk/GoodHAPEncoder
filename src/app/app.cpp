@@ -254,20 +254,7 @@ void App::probeLoop() {
 // encoding
 
 std::string App::outputPathFor(const QueueItem& item, HapFormat fmt) const {
-    fs::path src = u8path(item.path);
-    std::string stem = u8str(src.stem());
-    if (item.info.isImageSequence) {
-        // shot_0001 -> shot
-        while (!stem.empty() && isdigit((unsigned char)stem.back())) stem.pop_back();
-        while (!stem.empty() && (stem.back() == '_' || stem.back() == '.' || stem.back() == '-' || stem.back() == ' ')) stem.pop_back();
-        if (stem.empty()) stem = u8str(src.parent_path().filename());
-    }
-    fs::path dir = settings_.outputDir.empty() ? src.parent_path() : u8path(settings_.outputDir);
-    std::string suffix = fmt == HapFormat::HapQAlpha ? "_HapQAlpha" : "_HapQ";
-    fs::path out = dir / u8path(stem + suffix + ".mov");
-    std::error_code ec;
-    for (int n = 2; fs::exists(out, ec); ++n) out = dir / u8path(stem + suffix + " (" + std::to_string(n) + ").mov");
-    return u8str(out);
+    return defaultOutputPath(item.path, item.info.isImageSequence, fmt, settings_.outputDir);
 }
 
 void App::startEncoding() {

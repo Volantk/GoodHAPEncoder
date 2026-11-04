@@ -20,6 +20,11 @@ struct TranscodeProgress {
     double fps = 0, elapsed = 0;
 };
 
+// <dir>/<name>_HapQ.mov (or _HapQAlpha), next to the source when dir is empty.
+// Image sequences drop the frame number (shot_0001.png -> shot_HapQ.mov).
+// Never returns an existing file: adds " (2)", " (3)" ...
+std::string defaultOutputPath(const std::string& input, bool isSequence, HapFormat fmt, const std::string& dir = {});
+
 bool transcode(const TranscodeJob& job, const std::function<void(const TranscodeProgress&)>& progress,
                const std::atomic<bool>* cancel, std::string& err);
 

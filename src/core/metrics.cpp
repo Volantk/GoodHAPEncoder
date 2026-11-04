@@ -2,10 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <execution>
-#include <numeric>
 
 #include "block_decode.h"
+#include "parallel.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -39,9 +38,7 @@ static void blur(const ImageF& in, ImageF& out, float sigma) {
     for (auto& v : k) v /= s;
     ImageF tmp = in;
     out = in;
-    std::vector<int> rows(in.h);
-    std::iota(rows.begin(), rows.end(), 0);
-    std::for_each(std::execution::par, rows.begin(), rows.end(), [&](int y) {
+    parallelFor(in.h, [&](int y) {
         for (int x = 0; x < in.w; ++x)
             for (int c = 0; c < 3; ++c) {
                 float a = 0;
@@ -49,7 +46,7 @@ static void blur(const ImageF& in, ImageF& out, float sigma) {
                 tmp.rgb[(size_t(y) * in.w + x) * 3 + c] = a;
             }
     });
-    std::for_each(std::execution::par, rows.begin(), rows.end(), [&](int y) {
+    parallelFor(in.h, [&](int y) {
         for (int x = 0; x < in.w; ++x)
             for (int c = 0; c < 3; ++c) {
                 float a = 0;

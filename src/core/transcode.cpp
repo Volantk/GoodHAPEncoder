@@ -1,8 +1,11 @@
 #include "transcode.h"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -49,7 +52,32 @@ private:
     bool closed_ = false;
 };
 
+std::filesystem::path toPath(const std::string& s) {
+    return std::filesystem::path(std::u8string(s.begin(), s.end()));
+}
+std::string fromPath(const std::filesystem::path& p) {
+    std::u8string s = p.u8string();
+    return std::string(s.begin(), s.end());
+}
+
 } // namespace
+
+std::string defaultOutputPath(const std::string& input, bool isSequence, HapFormat fmt, const std::string& dir) {
+    namespace fs = std::filesystem;
+    fs::path src = toPath(input);
+    std::string stem = fromPath(src.stem());
+    if (isSequence) {
+        while (!stem.empty() && isdigit((unsigned char)stem.back())) stem.pop_back();
+        while (!stem.empty() && (stem.back() == '_' || stem.back() == '.' || stem.back() == '-' || stem.back() == ' ')) stem.pop_back();
+        if (stem.empty()) stem = fromPath(src.parent_path().filename());
+    }
+    fs::path outDir = dir.empty() ? src.parent_path() : toPath(dir);
+    std::string suffix = fmt == HapFormat::HapQAlpha ? "_HapQAlpha" : "_HapQ";
+    fs::path out = outDir / toPath(stem + suffix + ".mov");
+    std::error_code ec;
+    for (int n = 2; fs::exists(out, ec); ++n) out = outDir / toPath(stem + suffix + " (" + std::to_string(n) + ").mov");
+    return fromPath(out);
+}
 
 bool transcode(const TranscodeJob& job, const std::function<void(const TranscodeProgress&)>& progress,
                const std::atomic<bool>* cancel, std::string& err) {

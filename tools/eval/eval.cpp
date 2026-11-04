@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -36,12 +37,20 @@ using namespace ghap;
 #endif
 
 static bool writePng(const std::string& path, int w, int h, const std::vector<uint16_t>& rgba64) {
-    std::string cmd = std::string("\"\"") + GHAP_FFMPEG_EXE + "\" -hide_banner -loglevel error -y -f rawvideo -pix_fmt rgba64le -s " +
-                      std::to_string(w) + "x" + std::to_string(h) + " -i - -pix_fmt rgb48be \"" + path + "\"\"";
-    FILE* p = _popen(cmd.c_str(), "wb");
+    std::string cmd = std::string("\"") + GHAP_FFMPEG_EXE + "\" -hide_banner -loglevel error -y -f rawvideo -pix_fmt rgba64le -s " +
+                      std::to_string(w) + "x" + std::to_string(h) + " -i - -pix_fmt rgb48be \"" + path + "\"";
+#ifdef _WIN32
+    FILE* p = _popen(("\"" + cmd + "\"").c_str(), "wb"); // cmd.exe strips one pair of outer quotes
+#else
+    FILE* p = popen(cmd.c_str(), "w");
+#endif
     if (!p) return false;
     fwrite(rgba64.data(), 2, rgba64.size(), p);
+#ifdef _WIN32
     return _pclose(p) == 0;
+#else
+    return pclose(p) == 0;
+#endif
 }
 
 static bool writePng(const std::string& path, const ImageF& im) {

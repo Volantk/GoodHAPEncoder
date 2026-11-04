@@ -35,11 +35,33 @@ Speed (24 threads, 3360x1890): Fast ~6 fps, Normal ~3 fps, High ~1.8 fps. FFmpeg
 
 The preview uploads real BC3/BC4 textures and decodes them on the GPU with the Hap Q shader, so it shows what a player shows.
 
-**CLI:** `goodhap-cli <input> <output.mov> [--quality fast|normal|high|max] [--dither 0..1] [--static-dither] [--format q|qa] [--frames N] [--chunks N] [--no-snappy]`
+**CLI** (Windows and macOS):
 
-## Build
+```
+goodhap-cli [options] <input>... [-o <output.mov | folder>]
 
-Windows, VS 2022, CMake 3.24+.
+goodhap-cli clip.mov                          # -> clip_HapQ.mov next to it
+goodhap-cli --quality high *.mov -o ~/hap     # batch into a folder
+goodhap-cli renders/shot_0001.exr -o shot.mov # whole numbered sequence
+```
+
+Options: `--quality fast|normal|high|max` (default normal), `--dither 0..1`, `--static-dither`, `--format q|qa` (default: Alpha when the source has alpha), `--frames N`, `--chunks N`, `--no-snappy`. Ctrl-C stops and deletes the unfinished file.
+
+## macOS
+
+CLI only. Needs [Homebrew](https://brew.sh); the script installs FFmpeg 8+, CMake and pkg-config if missing.
+
+```
+git clone https://github.com/Volantk/GoodHAPEncoder && cd GoodHAPEncoder
+./build-mac.sh
+./build-mac/bin/goodhap-cli --help
+```
+
+The `macOS CLI` GitHub workflow builds and tests it on Apple Silicon and keeps the binary as an artifact. That binary links Homebrew's FFmpeg, so it still needs `brew install ffmpeg` on the machine that runs it.
+
+## Build (Windows)
+
+VS 2022, CMake 3.24+.
 
 ```
 # FFmpeg 9 shared (LGPL) into third_party/ffmpeg:
