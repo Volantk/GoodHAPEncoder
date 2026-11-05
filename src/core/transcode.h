@@ -17,7 +17,9 @@ struct TranscodeJob {
 
 struct TranscodeProgress {
     int64_t done = 0, total = 0;
-    double fps = 0, elapsed = 0;
+    double fps = 0, elapsed = 0; // fps: average since the start
+    double recentFps = 0;        // over the last ~2 seconds
+    double frameMs = 0;          // encode time of the latest frame (block search only)
 };
 
 // <dir>/<name>_HapQ.mov (or _HapQAlpha), next to the source when dir is empty.

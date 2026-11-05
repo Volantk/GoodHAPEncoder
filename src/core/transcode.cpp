@@ -123,15 +123,22 @@ bool transcode(const TranscodeJob& job, const std::function<void(const Transcode
         }
     });
 
+    std::deque<double> stamps; // finish times of recent frames, for recentFps
     while (auto f = decoded.pop()) {
         if (cancelled()) continue; // drain so the reader can finish
         FrameView v{f->rgba.data(), f->width, f->height, f->width * 4};
         EncodedTextures tex;
+        auto e0 = std::chrono::steady_clock::now();
         encodeTextures(v, settings, int(f->index), tex);
+        auto e1 = std::chrono::steady_clock::now();
         encoded.push({f->index, std::move(tex)});
         p.done = f->index + 1;
-        p.elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        p.elapsed = std::chrono::duration<double>(e1 - t0).count();
         p.fps = p.elapsed > 0 ? p.done / p.elapsed : 0;
+        p.frameMs = std::chrono::duration<double, std::milli>(e1 - e0).count();
+        stamps.push_back(p.elapsed);
+        while (stamps.size() > 2 && stamps.back() - stamps.front() > 2.0) stamps.pop_front();
+        p.recentFps = stamps.size() > 1 ? (stamps.size() - 1) / std::max(1e-6, stamps.back() - stamps.front()) : p.fps;
         if (progress) progress(p);
     }
     encoded.close();

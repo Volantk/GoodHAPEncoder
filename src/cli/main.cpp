@@ -224,14 +224,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[%zu/%zu] %s -> %s\n      %dx%d, %d-bit%s, %s\n", n + 1, inputs.size(), in.c_str(), job.output.c_str(),
                      info.width, info.height, info.bitDepth, info.hasAlpha ? " + alpha" : "", formatName(job.settings.format));
         auto t0 = std::chrono::steady_clock::now();
+        static FILE* speedLog = std::getenv("GOODHAP_SPEED_LOG") ? std::fopen(std::getenv("GOODHAP_SPEED_LOG"), "w") : nullptr;
         bool ok = transcode(job, [](const TranscodeProgress& p) {
+            // Current speed, not the average since the start: a slowdown shows at once.
             if (p.total > 0) {
-                double eta = p.fps > 0 ? (p.total - p.done) / p.fps : 0;
-                std::fprintf(stderr, "\r      %lld/%lld frames  %.1f fps  %d:%02d left   ", (long long)p.done, (long long)p.total, p.fps,
-                             int(eta) / 60, int(eta) % 60);
+                double eta = p.recentFps > 0 ? (p.total - p.done) / p.recentFps : 0;
+                std::fprintf(stderr, "\r      %lld/%lld frames  %.1f fps (avg %.1f)  %d:%02d left   ", (long long)p.done, (long long)p.total,
+                             p.recentFps, p.fps, int(eta) / 60, int(eta) % 60);
             } else {
-                std::fprintf(stderr, "\r      %lld frames  %.1f fps   ", (long long)p.done, p.fps);
+                std::fprintf(stderr, "\r      %lld frames  %.1f fps (avg %.1f)   ", (long long)p.done, p.recentFps, p.fps);
             }
+            if (speedLog) std::fprintf(speedLog, "%lld\t%.3f\t%.1f\n", (long long)p.done, p.elapsed, p.frameMs);
         }, &g_cancel, err);
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::fprintf(stderr, "\n");
